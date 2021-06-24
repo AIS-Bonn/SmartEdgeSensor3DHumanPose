@@ -31,6 +31,7 @@ Clone this repo inside your catkin workspace:
 ```
 cd catkin_ws/src
 git clone https://github.com/AIS-Bonn/SmartEdgeSensor3DHumanPose.git
+cd ..
 catkin build --cmake-args -DCMAKE_BUILD_TYPE=Release
 source devel/setup.bash
 ```
