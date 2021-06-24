@@ -1,5 +1,5 @@
 # SmartEdgeSensor3DHumanPose
-In this repo we will publish the code for the paper:<br>
+In this repo we publish the code for the paper:<br>
 "Real-Time Multi-View 3D Human Pose Estimation using Semantic Feedback to Smart Edge Sensors"
 
 ## Citation
