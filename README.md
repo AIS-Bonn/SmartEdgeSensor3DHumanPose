@@ -42,7 +42,9 @@ start `rviz` with the included perspective `pose_hall.rviz`.\
 run the launchfile: `roslaunch pose_prior pose_triangulate_demo.launch`.\
 playback the bag file: `rosbag play poses2D_16cam.bag`.
 
-The 2D poses should be rendered in the rqt windows and the estimated triangulated 3D skeletons be displayed rviz.
+The 2D poses are rendered in the rqt window and the estimated triangulated 3D skeletons displayed in rviz, as in the picture below.
+![demo rqt rviz views](rqtrvizview.png)
+
 
 ## Credits
 We use code from other open-source software libraries in our implementation:
