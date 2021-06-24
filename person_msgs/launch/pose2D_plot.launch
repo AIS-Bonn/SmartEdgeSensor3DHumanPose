@@ -1,0 +1,81 @@
+<launch>
+    <node pkg="person_msgs" type="pose2D_plot_node.py" name="pose2D_plot_cam1" output="screen">
+        <remap from="/human_joints" to="/cam_1/human_joints" />
+        <remap from="image_overlay_from_json" to="/cam_1/color/image_overlay" />
+    </node>
+
+    <node pkg="person_msgs" type="pose2D_plot_node.py" name="pose2D_plot_cam2" output="screen">
+        <remap from="/human_joints" to="/cam_2/human_joints" />
+        <remap from="image_overlay_from_json" to="/cam_2/color/image_overlay" />
+    </node>
+    
+    <node pkg="person_msgs" type="pose2D_plot_node.py" name="pose2D_plot_cam3" output="screen">
+        <remap from="/human_joints" to="/cam_3/human_joints" />
+        <remap from="image_overlay_from_json" to="/cam_3/color/image_overlay" />
+    </node>
+    
+    <node pkg="person_msgs" type="pose2D_plot_node.py" name="pose2D_plot_cam4" output="screen">
+        <remap from="/human_joints" to="/cam_4/human_joints" />
+        <remap from="image_overlay_from_json" to="/cam_4/color/image_overlay" />
+    </node>
+    
+    <node pkg="person_msgs" type="pose2D_plot_node.py" name="pose2D_plot_cam5" output="screen">
+        <remap from="/human_joints" to="/cam_5/human_joints" />
+        <remap from="image_overlay_from_json" to="/cam_5/color/image_overlay" />
+    </node>
+    
+    <node pkg="person_msgs" type="pose2D_plot_node.py" name="pose2D_plot_cam6" output="screen">
+        <remap from="/human_joints" to="/cam_6/human_joints" />
+        <remap from="image_overlay_from_json" to="/cam_6/color/image_overlay" />
+    </node>
+    
+    <node pkg="person_msgs" type="pose2D_plot_node.py" name="pose2D_plot_cam7" output="screen">
+        <remap from="/human_joints" to="/cam_7/human_joints" />
+        <remap from="image_overlay_from_json" to="/cam_7/color/image_overlay" />
+    </node>
+    
+    <node pkg="person_msgs" type="pose2D_plot_node.py" name="pose2D_plot_cam8" output="screen">
+        <remap from="/human_joints" to="/cam_8/human_joints" />
+        <remap from="image_overlay_from_json" to="/cam_8/color/image_overlay" />
+    </node>
+    
+    <node pkg="person_msgs" type="pose2D_plot_node.py" name="pose2D_plot_cam9" output="screen">
+        <remap from="/human_joints" to="/cam_9/human_joints" />
+        <remap from="image_overlay_from_json" to="/cam_9/color/image_overlay" />
+    </node>
+
+    <node pkg="person_msgs" type="pose2D_plot_node.py" name="pose2D_plot_cam10" output="screen">
+        <remap from="/human_joints" to="/cam_10/human_joints" />
+        <remap from="image_overlay_from_json" to="/cam_10/color/image_overlay" />
+    </node>
+    
+    <node pkg="person_msgs" type="pose2D_plot_node.py" name="pose2D_plot_cam11" output="screen">
+        <remap from="/human_joints" to="/cam_11/human_joints" />
+        <remap from="image_overlay_from_json" to="/cam_11/color/image_overlay" />
+    </node>
+    
+    <node pkg="person_msgs" type="pose2D_plot_node.py" name="pose2D_plot_cam12" output="screen">
+        <remap from="/human_joints" to="/cam_12/human_joints" />
+        <remap from="image_overlay_from_json" to="/cam_12/color/image_overlay" />
+    </node>
+    
+    <node pkg="person_msgs" type="pose2D_plot_node.py" name="pose2D_plot_cam14" output="screen">
+        <remap from="/human_joints" to="/cam_14/human_joints" />
+        <remap from="image_overlay_from_json" to="/cam_14/color/image_overlay" />
+    </node>
+    
+    <node pkg="person_msgs" type="pose2D_plot_node.py" name="pose2D_plot_cam13" output="screen">
+        <remap from="/human_joints" to="/cam_13/human_joints" />
+        <remap from="image_overlay_from_json" to="/cam_13/color/image_overlay" />
+    </node>
+
+    <node pkg="person_msgs" type="pose2D_plot_node.py" name="pose2D_plot_cam15" output="screen">
+        <remap from="/human_joints" to="/cam_15/human_joints" />
+        <remap from="image_overlay_from_json" to="/cam_15/color/image_overlay" />
+    </node>
+    
+    <node pkg="person_msgs" type="pose2D_plot_node.py" name="pose2D_plot_cam16" output="screen">
+        <remap from="/human_joints" to="/cam_16/human_joints" />
+        <remap from="image_overlay_from_json" to="/cam_16/color/image_overlay" />
+    </node>
+</launch>

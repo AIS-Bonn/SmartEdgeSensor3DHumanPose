@@ -1,0 +1,6 @@
+<launch>
+    <node pkg="pose_reprojection" type="skeleton_reproj_mult_node" name="skeleton_reprojection_multiperson" output="screen" >
+        <param name="pose_method" value="simple" />
+        <rosparam param="cameras">[cam_9, cam_10, cam_11, cam_12, cam_14]</rosparam>
+    </node>
+</launch>

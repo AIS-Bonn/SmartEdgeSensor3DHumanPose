@@ -1,0 +1,30 @@
+<launch>
+    <arg name="ros_ip" default="127.0.0.1" />
+    <arg name="vis_cov" default="false" />
+    <arg name="norm_height" default="false" />
+    <arg name="max_epi_dist" default="0.045" />
+    <arg name="cameras" default="[cam_1,cam_2,cam_3,cam_4,cam_5,cam_6,cam_7,cam_8,cam_9,cam_10,cam_11,cam_12,cam_13,cam_14,cam_15,cam_16]" />
+    
+    <include file="$(find pose_prior)/launch/cameras_extrinsics.launch" />
+    <include file="$(find person_msgs)/launch/pose2D_plot.launch" />
+        
+    <node pkg="skeleton_3d" type="skeleton_3d_triang_mult_node" name="skeleton_3d_triangulation_multiperson" output="screen" >
+        <param name="pose_method" value="simple" />
+        <param name="vis_cov" value="$(arg vis_cov)" />
+        <param name="max_epi_dist" value="$(arg max_epi_dist)" />
+        <rosparam param="cameras" subst_value="True">$(arg cameras)</rosparam>
+    </node>
+    
+    <node pkg="pose_reprojection" type="skeleton_reproj_mult_node" name="skeleton_reprojection_multiperson" output="screen" >
+        <env name="ROS_IP" value="$(arg ros_ip)" />
+        <param name="pose_method" value="simple" />
+        <rosparam param="cameras" subst_value="True">$(arg cameras)</rosparam>
+    </node>
+    
+    <env name="LD_LIBRARY_PATH" value="/usr/local/lib:$(env LD_LIBRARY_PATH)" />
+    <node pkg="pose_prior" type="pose_prior_mult_node" name="pose_prior_multiperson" output="screen" >
+        <param name="pose_method" value="simple" />
+        <param name="norm_height" value="$(arg norm_height)" />
+        <param name="vis_cov"     value="$(arg vis_cov)" />
+    </node>
+</launch>
