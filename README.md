@@ -44,6 +44,7 @@ playback the bag file: `rosbag play poses2D_16cam.bag`.
 
 The 2D poses are rendered in the rqt window and the estimated triangulated 3D skeletons displayed in rviz, as in the picture below.
 ![demo rqt rviz views](rqtrvizview.png)
+Note: Enough processing power is needed to process the 16 camera views and 6 people in real time. If a lot of warnings about "Large frame delay..." occur, try playing back the bag-file in reduced speed.
 
 
 ## Credits
