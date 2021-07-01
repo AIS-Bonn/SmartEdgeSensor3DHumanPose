@@ -961,7 +961,7 @@ void triangulate_persons(const vector<Person2DList::ConstPtr>& people, PersonCov
         else if(person_3d.keypoints[FUSION_BODY_PARTS::RAnkle].score > 0)
           feet_height = person_3d.keypoints[FUSION_BODY_PARTS::RAnkle].joint.z;
         if(std::abs(feet_height) > 0.50){ // Max tolerance of 50cm above or below ground
-          cout << "WARNING: removing person detection " << hyp_idx << " due to implausible feet-height of " << feet_height << "m." << endl;
+          //cout << "WARNING: removing person detection " << hyp_idx << " due to implausible feet-height of " << feet_height << "m." << endl;
           num_valid_keypoints = 0;
         }
 
