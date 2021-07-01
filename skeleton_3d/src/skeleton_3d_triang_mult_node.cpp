@@ -55,7 +55,7 @@ const string PERSON_3D_TOPIC = "human_pose_estimation/persons_3d";
 
 static int NUM_KEYPOINTS = 17;
 const int g_min_num_valid_keypoints = 9; // 5
-static double g_triangulation_threshold = 0.30; // threshold on confidence values for triangulation
+static float g_triangulation_threshold = 0.30f; // threshold on confidence values for triangulation
 const double g_reproj_error_max_acceptable = 0.050; // in normalized image coordinates (roughly 50 pixels (fx / fy is around 1000))
 static double g_max_epipolar_error = 0.050; // in normalized image coordinates
 const double g_max_joint_dist_to_root = 2.0; //joints can have a maximum distance of 2m to the root joint (mid-hip)
@@ -148,24 +148,24 @@ static double g_min_sigmas_3d[3] = {std::numeric_limits<double>::max(), std::num
 static double g_max_sigmas_3d[3] = {std::numeric_limits<double>::lowest(), std::numeric_limits<double>::lowest(), std::numeric_limits<double>::lowest()};
 static double g_limbLCovOffsetSigma = 0.075; // standard deviation for noise offset due to limbe-length model
 
+typedef Eigen::Matrix<float, 3, 4> Matrix34f;
+
 struct PersonHypothesis{
-  std::vector<std::vector<cv::Point3d> > keypoints_normalized;
+  std::vector<std::vector<Eigen::Vector3f> > keypoints_normalized;
   std::vector<std::vector<Eigen::Matrix2f> > keypoints_cov_normalized;
-  std::vector<cv::Mat> cameraExtrinsics;
+  std::vector<Matrix34f> cameraExtrinsics;
   std::vector<int> cameraIDs;
   std::vector<float> score;
 };
 
-void getTransforms(map<string, cv::Mat>& transforms_cam, const tf2_ros::Buffer& tfBuffer){
+void getTransforms(map<string, Eigen::Affine3d>& transforms_cam, const tf2_ros::Buffer& tfBuffer){
   bool success = false;
   while (!success && ros::ok()){
     try {
       for (int i = 0; i < NUM_CAMERAS; ++i) {
         auto transform = tfBuffer.lookupTransform(CAM_FRAMES[i], BASE_FRAME, ros::Time(0));
         Eigen::Affine3d to_cam_eigen = tf2::transformToEigen(transform);
-        cv::Mat to_cam_cv;
-        cv::eigen2cv(to_cam_eigen.matrix(), to_cam_cv);
-        auto ret = transforms_cam.insert(std::pair<string, cv::Mat>(CAM_FRAMES[i], to_cam_cv));
+        auto ret = transforms_cam.insert(std::pair<string, Eigen::Affine3d>(CAM_FRAMES[i], to_cam_eigen));
         if(!ret.second){
           ROS_ERROR("transform for frame %s already exists!", ret.first->first.c_str());
         }
@@ -188,7 +188,7 @@ void getTransforms(map<string, cv::Mat>& transforms_cam, const tf2_ros::Buffer& 
   cout << "Transforms: " << endl;
   for (const auto & it : transforms_cam) {
     cout << it.first << ":" << endl;
-    cout << it.second << endl << endl;
+    cout << it.second.matrix() << endl << endl;
   }
 }
 
@@ -227,14 +227,16 @@ void getIntrinsics(vector<sensor_msgs::CameraInfo>& intrinsics, ros::NodeHandle&
   }
 }
 
-void cross_prod_matrix(const cv::Mat& vec, cv::Mat& mat_cross){
-  mat_cross = cv::Mat::zeros(3, 3, CV_64F);
-  mat_cross.at<double>(1,0) = vec.at<double>(2);
-  mat_cross.at<double>(2,0) = -1.0 * vec.at<double>(1);
-  mat_cross.at<double>(0,1) = -1.0 * vec.at<double>(2);
-  mat_cross.at<double>(2,1) = vec.at<double>(0);
-  mat_cross.at<double>(0,2) = vec.at<double>(1);
-  mat_cross.at<double>(1,2) = -1.0 * vec.at<double>(0);
+inline void cross_prod_matrix(const Eigen::Vector3d& vec, Eigen::Matrix3d& mat_cross){
+  mat_cross << 0, -vec(2), vec(1),
+               vec(2), 0, -vec(0),
+              -vec(1), vec(0), 0;
+}
+
+inline void pseudo_inv34d(const Eigen::Matrix<double,3,4>& mat, Eigen::Matrix<double,4,3>& mat_inv, double epsilon = std::numeric_limits<double>::epsilon()){
+  auto svd = mat.jacobiSvd(Eigen::ComputeThinU | Eigen::ComputeThinV);
+  double tolerance = epsilon * std::max(mat.cols(), mat.rows()) * svd.singularValues()[0];
+  mat_inv = svd.matrixV() * Eigen::Vector3d( (svd.singularValues().array().abs() > tolerance).select(svd.singularValues().array().inverse(), 0) ).asDiagonal() * svd.matrixU().adjoint();
 }
 
 int get_fundamental_idx(int i, int j){
@@ -307,37 +309,30 @@ void setMarkerPose(visualization_msgs::Marker& marker, const KeypointWithCovaria
   if (es.eigenvalues().z() > g_max_sigmas_3d[2]){g_max_sigmas_3d[2] = es.eigenvalues().z();}
 }
 
-double getRowNorm(const cv::Mat& row){
-  int num_elem = row.cols;
-  double norm = 0.;
-  for (int i = 0; i < num_elem; ++i) {
-    norm += row.at<double>(i) * row.at<double>(i);
-  }
-  return std::sqrt(norm);
-}
-
-int normalize_keypoints(vector<cv::Point3d>& keypoints_normalized, vector<Eigen::Matrix2f>& covs_normalized, const image_geometry::PinholeCameraModel& intr, const person_msgs::Person2D& human){
+int normalize_keypoints(vector<Eigen::Vector3f>& keypoints_normalized, vector<Eigen::Matrix2f>& covs_normalized, const image_geometry::PinholeCameraModel& intr, const person_msgs::Person2D& human){
   int num_valid_kps = 0;
+  const float fx = static_cast<float>(intr.fx());
+  const float fy = static_cast<float>(intr.fy());
+  const float cx = static_cast<float>(intr.cx());
+  const float cy = static_cast<float>(intr.cy());
+
   for (int kp_idx = 0; kp_idx < NUM_KEYPOINTS; ++ kp_idx) {
     const auto& kp = human.keypoints[kp_idx]; // kp = [x, y, score]
-    if((double)kp.score >= g_triangulation_threshold){
-      double u = static_cast<double>(kp.x); // Keypoints are passed in absolute coordinates
-      double v = static_cast<double>(kp.y);
-      keypoints_normalized[kp_idx] = cv::Point3d((u - intr.cx()) / intr.fx(), (v - intr.cy()) / intr.fy(), (double)kp.score);
+    if(kp.score >= g_triangulation_threshold){
+      keypoints_normalized[kp_idx] = Eigen::Vector3f((kp.x - cx) / fx, (kp.y - cy) / fy, kp.score);
 
-      float fx = static_cast<float>(intr.fx());
-      float fy = static_cast<float>(intr.fy());
       Eigen::Matrix2f cov;
       cov << kp.cov[0] / (fx*fx), kp.cov[1] / (fx*fy), // scale covariance to normalized camera coordinates
              kp.cov[1] / (fx*fy), kp.cov[2] / (fy*fy);
       covs_normalized[kp_idx] = cov;
+
       ++num_valid_kps;
     }
   }
   return num_valid_kps;
 }
 
-double calcCost(const PersonHypothesis& hyp, const vector<cv::Point3d>& det_kps, int det_ID, const vector<cv::Mat>& fundamental_matrices, bool& veto){
+double calcCost(const PersonHypothesis& hyp, const vector<Eigen::Vector3f>& det_kps, int det_ID, const vector<Eigen::Matrix3f>& fundamental_matrices, bool& veto){
   double total_cost = 0.;
   int n_obs_used = 0;
   int n_obs_in_hyp = hyp.cameraIDs.size();
@@ -347,22 +342,24 @@ double calcCost(const PersonHypothesis& hyp, const vector<cv::Point3d>& det_kps,
   }
 
   veto = false; // if true we cannot join the detection with the hypothesis
-  double tmp_veto = 0.0, tolerance = 1.0 - 1.0 / (2*n_obs_in_hyp), veto_delta = 1.0 / n_obs_in_hyp;
+  double tmp_veto = 0.0;
+  const double tolerance = 1.0 - 1.0 / (2*n_obs_in_hyp), veto_delta = 1.0 / n_obs_in_hyp;
   for (int obs_idx = 0; obs_idx < n_obs_in_hyp; ++obs_idx) {
     double cost = 0.;
     int n_joints_used = 0;
-    const cv::Mat& F = fundamental_matrices[get_fundamental_idx(hyp.cameraIDs[obs_idx], det_ID)];
-    const vector<cv::Point3d>& hyp_kps = hyp.keypoints_normalized[obs_idx]; // kp = [x, y, conf]
+    const Eigen::Matrix3f& F = fundamental_matrices[get_fundamental_idx(hyp.cameraIDs[obs_idx], det_ID)];
+    const Eigen::Matrix3f  FT = F.transpose();
+    const vector<Eigen::Vector3f>& hyp_kps = hyp.keypoints_normalized[obs_idx]; // kp = [x, y, conf]
     for (int kp_idx = 0; kp_idx < NUM_KEYPOINTS; ++ kp_idx) {
-      if(hyp_kps[kp_idx].z > g_triangulation_threshold && det_kps[kp_idx].z > g_triangulation_threshold){ // z is confidence value! both keypoints are valid
-        cv::Mat p1(cv::Vec3d(hyp_kps[kp_idx].x, hyp_kps[kp_idx].y, 1.0));
-        cv::Mat p2(cv::Vec3d(det_kps[kp_idx].x, det_kps[kp_idx].y, 1.0));
-        cv::Mat epipolar_line_1 = F * p1;
-        cv::Mat epipolar_line_2 = F.t() * p2;
+      if(hyp_kps[kp_idx].z() > g_triangulation_threshold && det_kps[kp_idx].z() > g_triangulation_threshold){ // z is confidence value! both keypoints are valid
+        Eigen::Vector3f p1(hyp_kps[kp_idx].x(), hyp_kps[kp_idx].y(), 1.0f);
+        Eigen::Vector3f p2(det_kps[kp_idx].x(), det_kps[kp_idx].y(), 1.0f);
+        Eigen::Vector3f epipolar_line_1 = F * p1;
+        Eigen::Vector3f epipolar_line_2 = FT * p2;
         //Point-to-line distance: abs(p2.dot(l)) / sqrt(l0²+l1²)
-        double d1 = std::abs(cv::Mat(p2.t() * epipolar_line_1).at<double>(0)) / std::sqrt(epipolar_line_1.at<double>(0) * epipolar_line_1.at<double>(0) + epipolar_line_1.at<double>(1) * epipolar_line_1.at<double>(1));
-        double d2 = std::abs(cv::Mat(p1.t() * epipolar_line_2).at<double>(0)) / std::sqrt(epipolar_line_2.at<double>(0) * epipolar_line_2.at<double>(0) + epipolar_line_2.at<double>(1) * epipolar_line_2.at<double>(1));
-        cost += (d1 + d2);
+        float d1 = std::abs(p2.dot(epipolar_line_1)) / std::sqrt(epipolar_line_1(0) * epipolar_line_1(0) + epipolar_line_1(1) * epipolar_line_1(1));
+        float d2 = std::abs(p1.dot(epipolar_line_2)) / std::sqrt(epipolar_line_2(0) * epipolar_line_2(0) + epipolar_line_2(1) * epipolar_line_2(1));
+        cost += static_cast<double>(d1 + d2);
         ++n_joints_used;
       }
     }
@@ -425,110 +422,112 @@ void merge_persons(PersonCov& p1, const PersonCov& p2){
   }
 }
 
-double calcReprojectionError(const cv::Mat& reconstructedPoint, const std::vector<cv::Mat>& cameraMatrices, const std::vector<cv::Point3d>& pointsOnEachCamera){ // pointsOnEachCamera are [x, y, conf]
+double calcReprojectionError(const Eigen::Vector3f& reconstructedPoint, const std::vector<Matrix34f>& cameraMatrices, const std::vector<Eigen::Vector3f>& pointsOnEachCamera){ // pointsOnEachCamera are [x, y, conf]
   double averageError = 0.;
   double norm = 0.;
   for (auto i = 0u ; i < cameraMatrices.size() ; i++)
   {
-      cv::Mat imageX = cameraMatrices[i] * reconstructedPoint;
-      imageX /= imageX.at<double>(2,0);
-      const auto error = std::sqrt(std::pow(imageX.at<double>(0,0) - pointsOnEachCamera[i].x,2) + std::pow(imageX.at<double>(1,0) - pointsOnEachCamera[i].y,2));
-      averageError += pointsOnEachCamera[i].z * error; // weight by confidence
-      norm += pointsOnEachCamera[i].z;
+      Eigen::Vector2f imageX = (cameraMatrices[i] * reconstructedPoint.homogeneous()).eval().hnormalized();
+      const float dx = imageX.x() - pointsOnEachCamera[i].x();
+      const float dy = imageX.y() - pointsOnEachCamera[i].y();
+      const float error = std::sqrt(dx*dx + dy*dy);
+      averageError += static_cast<double>(pointsOnEachCamera[i].z() * error); // weight by confidence
+      norm += static_cast<double>(pointsOnEachCamera[i].z());
   }
   return averageError / norm;
 }
 
-double triangulate(cv::Mat& reconstructedPoint, const std::vector<cv::Mat>& cameraMatrices, const std::vector<cv::Point3d>& jointOnEachCamera){ // jointOnEachCamera are [x, y, conf]
+Eigen::Vector3f triangulate(const std::vector<Matrix34f>& cameraMatrices, const std::vector<Eigen::Vector3f>& jointOnEachCamera, bool weight_by_conf = false, double* reproj_error = nullptr){ // jointOnEachCamera are [x, y, conf]
   // Create and fill A for homogenous equation system Ax = 0: linear triangulation method to find a 3D point (DLT). For example, see Hartley & Zisserman section 12.2 (p.312).
-  const auto numCameras = (int)cameraMatrices.size();
-  cv::Mat A = cv::Mat::zeros(numCameras*2, 4, CV_64F);
+  const int numCameras = cameraMatrices.size();
+  Eigen::Matrix<float, -1, 4> A = Eigen::Matrix<float, -1, 4>::Zero(2 * numCameras, 4);
   for (auto i = 0 ; i < numCameras ; i++)
   {
-      A.row(2*i)   = jointOnEachCamera[i].x*cameraMatrices[i].row(2) - cameraMatrices[i].row(0);
-      A.row(2*i)  *= jointOnEachCamera[i].z / getRowNorm(A.row(2*i)); // weight by confidence
-      A.row(2*i+1) = jointOnEachCamera[i].y*cameraMatrices[i].row(2) - cameraMatrices[i].row(1);
-      A.row(2*i+1)*= jointOnEachCamera[i].z / getRowNorm(A.row(2*i+1)); // weight by confidence
+      A.row(2*i) = jointOnEachCamera[i].x() * cameraMatrices[i].row(2) - cameraMatrices[i].row(0);
+      A.row(2*i).normalize();
+      A.row(2*i+1) = jointOnEachCamera[i].y() * cameraMatrices[i].row(2) - cameraMatrices[i].row(1);
+      A.row(2*i+1).normalize();
+      if(weight_by_conf){
+        A.row(2*i) *= jointOnEachCamera[i].z(); // z = confidence
+        A.row(2*i+1)*= jointOnEachCamera[i].z();
+      }
   }
-  // Solve x for Ax = 0 --> SVD on A
-  cv::SVD svd{A};
-  svd.solveZ(A,reconstructedPoint);
-  reconstructedPoint /= reconstructedPoint.at<double>(3);
 
-  return calcReprojectionError(reconstructedPoint, cameraMatrices, jointOnEachCamera);
-}
+  const Eigen::Vector4f pt_homog = A.jacobiSvd(Eigen::ComputeThinV).matrixV().col(3);
+  //const Eigen::Vector4f pt_homog = A.bdcSvd(Eigen::ComputeThinV).matrixV().col(3);
 
-void triangulate_noReproj(cv::Mat& reconstructedPoint, const std::vector<cv::Mat>& cameraMatrices, const std::vector<cv::Point3d>& jointOnEachCamera){ // jointOnEachCamera are [x, y, conf]
-  // Create and fill A for homogenous equation system Ax = 0: linear triangulation method to find a 3D point (DLT). For example, see Hartley & Zisserman section 12.2 (p.312).
-  const auto numCameras = (int)cameraMatrices.size();
-  cv::Mat A = cv::Mat::zeros(numCameras*2, 4, CV_64F);
-  for (auto i = 0 ; i < numCameras ; i++)
-  {
-      A.row(2*i)   = jointOnEachCamera[i].x*cameraMatrices[i].row(2) - cameraMatrices[i].row(0);
-      A.row(2*i)  /= getRowNorm(A.row(2*i)); // normalize // *= jointOnEachCamera[i].z / getRowNorm(A.row(2*i)); // weight by confidence //
-      A.row(2*i+1) = jointOnEachCamera[i].y*cameraMatrices[i].row(2) - cameraMatrices[i].row(1);
-      A.row(2*i+1)/= getRowNorm(A.row(2*i+1)); // normalize // *= jointOnEachCamera[i].z / getRowNorm(A.row(2*i+1)); // weight by confidence //
-  }
-  // Solve x for Ax = 0 --> SVD on A
-  cv::SVD svd{A};
-  svd.solveZ(A,reconstructedPoint);
-  reconstructedPoint /= reconstructedPoint.at<double>(3);
+  const Eigen::Vector3f reconstructedPoint = pt_homog.hnormalized();
+
+  if(reproj_error != nullptr)
+    *reproj_error = calcReprojectionError(reconstructedPoint, cameraMatrices, jointOnEachCamera);
+
+  return reconstructedPoint;
 }
 
 double calcJointDist(const geometry_msgs::Point& j1, const geometry_msgs::Point& j2){
   return std::sqrt((j1.x - j2.x) * (j1.x - j2.x) + (j1.y - j2.y) * (j1.y - j2.y) + (j1.z - j2.z) * (j1.z - j2.z));
 }
 
-Eigen::RowVectorXd draw_sigma_points(vector<vector<cv::Point3d> >& sigma_points, const vector<cv::Point3d>& jointOnEachCamera, const vector<Eigen::Matrix2f>& cov_mats){
-  const int num_cameras = cov_mats.size();;
+inline void mod_samples(vector<vector<Eigen::Vector3f> >& sigma_points, const Eigen::Matrix2f& A, const float b, const int cam_idx){
+  //Cholesky 2x2
+  const float l11 = std::sqrt(A(0,0));
+  const float l21 = A(1,0) / l11;
+  const float l22 = sqrt(A(1,1) - l21*l21);
+
+  const float dx1 = l11*b;
+  const float dy1 = l21*b;
+  const float dy2 = l22*b; //dx2 = 0
+
+  sigma_points[4*cam_idx + 1][cam_idx].x() -= dx1;
+  sigma_points[4*cam_idx + 1][cam_idx].y() -= dy1;
+  sigma_points[4*cam_idx + 2][cam_idx].y() -= dy2; // dx2 = 0
+  sigma_points[4*cam_idx + 3][cam_idx].x() += dx1;
+  sigma_points[4*cam_idx + 3][cam_idx].y() += dy1;
+  sigma_points[4*cam_idx + 4][cam_idx].y() += dy2; // dx2 = 0
+}
+
+Eigen::RowVectorXf draw_sigma_points(vector<vector<Eigen::Vector3f> >& sigma_points, const vector<Eigen::Vector3f>& jointOnEachCamera, const vector<Eigen::Matrix2f>& cov_mats){
+  const int num_cameras = cov_mats.size();
   const int dim = 2*num_cameras;
-  const double kappa = 0.5; // (scaling) equal weight on all samples
+  constexpr float kappa = 0.5; // (scaling) equal weight on all samples
   const int num_samples = 2 * dim + 1;
-  Eigen::RowVectorXd weights(num_samples);
-  weights << 2 * kappa, Eigen::RowVectorXd::Ones(num_samples - 1);
-  weights /= (2.0 * (dim + kappa));
+  Eigen::RowVectorXf weights(num_samples);
+  weights << 2 * kappa, Eigen::RowVectorXf::Ones(num_samples - 1);
+  weights /= (2.0f * (dim + kappa));
 
   sigma_points.resize(num_samples); //num_samples - 1
   std::fill(sigma_points.begin(), sigma_points.end(), jointOnEachCamera);
-  Eigen::Matrix2f mat = std::sqrt(dim + kappa) * Eigen::Matrix2f::Identity();
-  Eigen::Matrix<float, 2, 4> samples_std_normal;
-  samples_std_normal << -mat, mat;
+  float b = std::sqrt(dim + kappa);
   for (int cam_idx = 0; cam_idx < num_cameras; ++cam_idx) {
-    Eigen::Matrix<float, 2, 4> samples = cov_mats[cam_idx].llt().matrixL() * samples_std_normal;
-    for(int sample_idx = 0; sample_idx < 4; ++sample_idx){
-      sigma_points[4*cam_idx + sample_idx + 1][cam_idx].x += (double)samples(0, sample_idx); //4*cam_idx + sample_idx
-      sigma_points[4*cam_idx + sample_idx + 1][cam_idx].y += (double)samples(1, sample_idx); //4*cam_idx + sample_idx
-    }
+    mod_samples(sigma_points, cov_mats[cam_idx], b, cam_idx);
   }
 
   return weights;
 }
 
-void calc_covariance(Eigen::Matrix3d& cov, const cv::Mat& mean_sample, const vector<cv::Point3d>& jointOnEachCamera, const vector<Eigen::Matrix2f>& covarianceOnEachCamera, const vector<cv::Mat>& cameraMatrices){
-  vector<vector<cv::Point3d> > sigma_points;
-  Eigen::RowVectorXd weights = draw_sigma_points(sigma_points, jointOnEachCamera, covarianceOnEachCamera);
+void calc_covariance(Eigen::Matrix3f& cov, const Eigen::Vector3f& mean_sample, const vector<Eigen::Vector3f>& jointOnEachCamera, const vector<Eigen::Matrix2f>& covarianceOnEachCamera, const vector<Matrix34f>& cameraMatrices){
+  vector<vector<Eigen::Vector3f> > sigma_points;
+  Eigen::RowVectorXf weights = draw_sigma_points(sigma_points, jointOnEachCamera, covarianceOnEachCamera);
+
   int num_samples = weights.cols();
   assert(sigma_points.size() == num_samples); // num_samples - 1
 
-  Eigen::Matrix3Xd transformedSamples(3, num_samples);
+  Eigen::Matrix3Xf transformedSamples(3, num_samples);
 
   for (int sample_idx = 0; sample_idx < num_samples ; ++sample_idx) { //num_samples - 1
-    cv::Mat reconstructedPoint;
-    triangulate_noReproj(reconstructedPoint, cameraMatrices, sigma_points[sample_idx]);
-    transformedSamples.col(sample_idx) = Eigen::Vector3d(reconstructedPoint.at<double>(0), reconstructedPoint.at<double>(1), reconstructedPoint.at<double>(2)); // sample_idx + 1
+      transformedSamples.col(sample_idx) = triangulate(cameraMatrices, sigma_points[sample_idx]);
   }
 
-  Eigen::Vector3d reconstrucedMean(mean_sample.at<double>(0), mean_sample.at<double>(1), mean_sample.at<double>(2));
-  Eigen::Matrix3Xd transformedSamples_centered = transformedSamples - reconstrucedMean.replicate(1, num_samples);
-  cov = transformedSamples_centered.cwiseProduct(weights.replicate<3,1>()) * transformedSamples_centered.transpose();
+  Eigen::Matrix3Xf transformedSamples_centered = transformedSamples.colwise() - mean_sample;
+  cov = (transformedSamples_centered.array().rowwise() * weights.array()).matrix() * transformedSamples_centered.transpose();
 }
 
 void triangulate_persons(const vector<Person2DList::ConstPtr>& people, PersonCovList& persons3d_msg, visualization_msgs::MarkerArray& skel3d_msg,
-                        const map<string, cv::Mat>& transforms_cam, const vector<cv::Mat>& fundamental_matrices, const vector<sensor_msgs::CameraInfo>& intrinsics){ //, double delta_t
+                        const map<string, Matrix34f>& transforms_cam, const vector<Eigen::Matrix3f>& fundamental_matrices, const vector<sensor_msgs::CameraInfo>& intrinsics){ //, double delta_t
   //Prepare intrinsics, offsets and extrinsics per camera..
   unsigned int num_humans = 0;
   vector<int> cameraIDs;
-  vector<cv::Mat> cameraExtrinsics;
+  vector<Matrix34f> cameraExtrinsics;
   vector<image_geometry::PinholeCameraModel> cameraIntrinsics;
   vector<vector<person_msgs::Person2D>> humans;
   humans.reserve(NUM_CAMERAS);
@@ -562,6 +561,7 @@ void triangulate_persons(const vector<Person2DList::ConstPtr>& people, PersonCov
 
   //Data association implemented from Tanke, Julian, and Juergen Gall. "Iterative greedy matching for 3d human pose tracking from multiple views." German Conference on Pattern Recognition, 2019.
   //https://github.com/jutanke/mv3dpose
+
   vector<PersonHypothesis> H;
   int cam_idx = 0; // add all detections in the first camera as initial hypotheses
   while(H.size() == 0 && cam_idx < num_cams_with_det){
@@ -572,7 +572,7 @@ void triangulate_persons(const vector<Person2DList::ConstPtr>& people, PersonCov
       hyp.cameraIDs.push_back(cameraIDs[cam_idx]);
       hyp.score.push_back(humans[cam_idx][human_idx].score);
 
-      vector<cv::Point3d> keypoints_normalized(NUM_KEYPOINTS, cv::Point3d(0., 0., -1.)); // Keypoints in normalized image coordinates
+      vector<Eigen::Vector3f> keypoints_normalized(NUM_KEYPOINTS, Eigen::Vector3f(0.f, 0.f, -1.f)); // Keypoints in normalized image coordinates
       vector<Eigen::Matrix2f> covs_normalized(NUM_KEYPOINTS); // Covariances in normalized image coordinates
       int num_valid_kps = normalize_keypoints(keypoints_normalized, covs_normalized, intr, humans[cam_idx][human_idx]);
 
@@ -586,13 +586,13 @@ void triangulate_persons(const vector<Person2DList::ConstPtr>& people, PersonCov
   }
 
   for (; cam_idx < num_cams_with_det; ++cam_idx) {
-    vector<vector<cv::Point3d> > dets_keypoints_normalized;
+    vector<vector<Eigen::Vector3f> > dets_keypoints_normalized;
     vector<vector<Eigen::Matrix2f> > dets_covs_normalized;
     vector<float> dets_score;
     const auto& intr = cameraIntrinsics[cam_idx];
 
     for (int det_idx = 0; det_idx < humans[cam_idx].size(); ++det_idx) {
-      vector<cv::Point3d> keypoints_normalized(NUM_KEYPOINTS, cv::Point3d(0., 0., -1.)); // Keypoints in normalized image coordinates
+      vector<Eigen::Vector3f> keypoints_normalized(NUM_KEYPOINTS, Eigen::Vector3f(0., 0., -1.)); // Keypoints in normalized image coordinates
       vector<Eigen::Matrix2f> covs_normalized(NUM_KEYPOINTS); // Covariances in normalized image coordinates
       int num_valid_kps = normalize_keypoints(keypoints_normalized, covs_normalized, intr, humans[cam_idx][det_idx]);
 
@@ -621,6 +621,7 @@ void triangulate_persons(const vector<Person2DList::ConstPtr>& people, PersonCov
           mask(hyp_idx, det_idx) = true;
           assignment[hyp_idx] = det_idx;
         }
+
       }
     }
 
@@ -680,7 +681,6 @@ void triangulate_persons(const vector<Person2DList::ConstPtr>& people, PersonCov
     for (int hyp_idx = 0; hyp_idx < H.size(); ++hyp_idx) {
       const auto& hyp = H[hyp_idx];
       int n_obs = hyp.cameraIDs.size();
-      //cout << "triangulation of hypothesis " << hyp_idx << " with " << n_obs << " observations." << endl;
       if(n_obs >= 2){ // Triangulate each joint
         PersonCov person_3d; // output message single person
         person_3d.keypoints.resize(FUSION_BODY_PARTS::NUM_KEYPOINTS);
@@ -716,18 +716,18 @@ void triangulate_persons(const vector<Person2DList::ConstPtr>& people, PersonCov
 
         int num_valid_keypoints = 0;
         for (int kp_idx = 0; kp_idx < NUM_KEYPOINTS; ++ kp_idx) {
-          vector<cv::Point3d> jointOnEachCamera; // x, y, conf
+          vector<Eigen::Vector3f> jointOnEachCamera; // x, y, conf
           vector<Eigen::Matrix2f> covarianceOnEachCamera;
-          vector<cv::Mat> cameraMatrices;
+          vector<Matrix34f> cameraMatrices;
           vector<int> cameraIdx_joint;
-          double avg_score = 0;
+          float avg_score = 0;
           for (int obs_idx = 0; obs_idx < n_obs; ++obs_idx) {
-            if(hyp.keypoints_normalized[obs_idx][kp_idx].z >= g_triangulation_threshold){ // only use keypoints with confidence larger than a minimum threshold
+            if(hyp.keypoints_normalized[obs_idx][kp_idx].z() >= g_triangulation_threshold){ // only use keypoints with confidence larger than a minimum threshold
               jointOnEachCamera.push_back(hyp.keypoints_normalized[obs_idx][kp_idx]);
               covarianceOnEachCamera.push_back(hyp.keypoints_cov_normalized[obs_idx][kp_idx]);
               cameraMatrices.push_back(hyp.cameraExtrinsics[obs_idx]);
               cameraIdx_joint.push_back(hyp.cameraIDs[obs_idx]);
-              avg_score += hyp.keypoints_normalized[obs_idx][kp_idx].z;
+              avg_score += hyp.keypoints_normalized[obs_idx][kp_idx].z();
             }
           }
 
@@ -741,13 +741,13 @@ void triangulate_persons(const vector<Person2DList::ConstPtr>& people, PersonCov
           // https://github.com/CMU-Perceptual-Computing-Lab/openpose/blob/master/doc/advanced/3d_reconstruction_module.md
           // https://github.com/CMU-Perceptual-Computing-Lab/openpose/tree/master/src/openpose/3d
           // Cao, Zhe, et al. "OpenPose: realtime multi-person 2D pose estimation using Part Affinity Fields." IEEE transactions on pattern analysis and machine intelligence 43.1 (2019): 172-186.
-          cv::Mat reconstructedPoint;
-          double reprojError = triangulate(reconstructedPoint, cameraMatrices, jointOnEachCamera);
 
-          if (reprojError > g_reproj_error_max_acceptable && numCameras == 3){ // If reprojection error is high, remove outlier camera (for only three observation, remove camera with highest epipolar distance)
-            // Find best projection
+          double reprojError;
+          Eigen::Vector3f reconstructedPoint = triangulate(cameraMatrices, jointOnEachCamera, true, &reprojError);
+
+          if (reprojError > g_reproj_error_max_acceptable && numCameras == 3){
             int bestIndex = -1;
-            double bestDist = reprojError * reprojError; // initialization.
+            float bestDist = static_cast<float>(reprojError * reprojError); // seems to be a good initialization..
             for (int i = 0; i < numCameras; ++i){
                 // Set initial values
                 auto cameraMatricesSubset = cameraMatrices;
@@ -760,15 +760,15 @@ void triangulate_persons(const vector<Person2DList::ConstPtr>& people, PersonCov
                 cameraIdxSubset.erase(cameraIdxSubset.begin() + i);
 
                 //Point-to-line distance: abs(p2.dot(l)) / sqrt(l0²+l1²)
-                cv::Mat p1(cv::Vec3d(pointsOnEachCameraSubset[0].x, pointsOnEachCameraSubset[0].y, 1.0));
-                cv::Mat p2(cv::Vec3d(pointsOnEachCameraSubset[1].x, pointsOnEachCameraSubset[1].y, 1.0));
-                const cv::Mat& F = fundamental_matrices[get_fundamental_idx(cameraIdxSubset[0], cameraIdxSubset[1])];
-                cv::Mat epipolar_line_1 = F * p1;
-                cv::Mat epipolar_line_2 = F.t() * p2;
-                double numerator_1 = cv::Mat(p2.t() * epipolar_line_1).at<double>(0);
-                double numerator_2 = cv::Mat(p1.t() * epipolar_line_2).at<double>(0);
-                double squared_symm_dist = numerator_1 * numerator_1 / (epipolar_line_1.at<double>(0) * epipolar_line_1.at<double>(0) + epipolar_line_1.at<double>(1) * epipolar_line_1.at<double>(1))
-                                         + numerator_2 * numerator_2 / (epipolar_line_2.at<double>(0) * epipolar_line_2.at<double>(0) + epipolar_line_2.at<double>(1) * epipolar_line_2.at<double>(1));
+                Eigen::Vector3f p1(pointsOnEachCameraSubset[0].x(), pointsOnEachCameraSubset[0].y(), 1.0f);
+                Eigen::Vector3f p2(pointsOnEachCameraSubset[1].x(), pointsOnEachCameraSubset[1].y(), 1.0f);
+                const Eigen::Matrix3f& F = fundamental_matrices[get_fundamental_idx(cameraIdxSubset[0], cameraIdxSubset[1])];
+                Eigen::Vector3f epipolar_line_1 = F * p1;
+                Eigen::Vector3f epipolar_line_2 = F.transpose() * p2;
+                float numerator_1 = p2.dot(epipolar_line_1);
+                float numerator_2 = p1.dot(epipolar_line_2);
+                float squared_symm_dist =  numerator_1 * numerator_1 / (epipolar_line_1(0) * epipolar_line_1(0) + epipolar_line_1(1) * epipolar_line_1(1))
+                                         + numerator_2 * numerator_2 / (epipolar_line_2(0) * epipolar_line_2(0) + epipolar_line_2(1) * epipolar_line_2(1));
                 //cout << "\t epipolar dist removing camera " << cameraIdx_joint[i] << " (F_" << cameraIdxSubset[0] << cameraIdxSubset[1] << " (idx " << get_fundamental_idx(cameraIdxSubset[0], cameraIdxSubset[1]) << ")): " << std::sqrt(squared_symm_dist) << endl;
 
                 if(squared_symm_dist < bestDist){
@@ -785,21 +785,17 @@ void triangulate_persons(const vector<Person2DList::ConstPtr>& people, PersonCov
                 cameraIdx_joint.erase(cameraIdx_joint.begin() + bestIndex);
 
                 // Get new triangulation results
-                cv::Mat reconstructedPointSubset;
-                const auto projectionErrorSubset = triangulate(reconstructedPointSubset, cameraMatrices, jointOnEachCamera);
-
-                reconstructedPoint = reconstructedPointSubset;
-                reprojError = projectionErrorSubset;
-                avg_score = (jointOnEachCamera[0].z + jointOnEachCamera[1].z) / 2.0; // update score as avg of the two left points.
+                reconstructedPoint = triangulate(cameraMatrices, jointOnEachCamera, true, &reprojError);
+                avg_score = (jointOnEachCamera[0].z() + jointOnEachCamera[1].z()) / 2.0f; // update score as avg of the two left points.
                 //cout << "Joint " << kp_idx << ": avg reprojection error removing camera " << cameraIdx_joint[bestIndex] << ": " << reprojError << " (approx. " << reprojError * cameraIntrinsics[0].fx() << "px), score: " << avg_score << endl;
             }
           }
           else if (reprojError > g_reproj_error_max_acceptable && numCameras >= 4){ //Run with all but 1 camera for each camera and use the one with minimum average reprojection error.
             // Find best projection
-            auto bestReprojection = reprojError;
-            auto bestReprojectionIndex = -1; // -1 means with all camera views
-            auto bestScore = avg_score;
-            cv::Mat bestReconstructedPoint;
+            double bestReprojection = reprojError;
+            int bestReprojectionIndex = -1; // -1 means with all camera views
+            float bestScore = avg_score;
+            Eigen::Vector3f bestReconstructedPoint;
             for (int i = 0; i < numCameras; ++i){
                 // Set initial values
                 auto cameraMatricesSubset = cameraMatrices;
@@ -810,18 +806,18 @@ void triangulate_persons(const vector<Person2DList::ConstPtr>& people, PersonCov
                 pointsOnEachCameraSubset.erase(pointsOnEachCameraSubset.begin() + i);
 
                 // Get new triangulation results
-                cv::Mat reconstructedPointSubset;
-                const auto projectionErrorSubset = triangulate(reconstructedPointSubset, cameraMatricesSubset, pointsOnEachCameraSubset);
+                double projectionErrorSubset;
+                Eigen::Vector3f reconstructedPointSubset = triangulate(cameraMatricesSubset, pointsOnEachCameraSubset, true, &projectionErrorSubset);
 
-                // If projection doesn't change much, this point is inlier (or all points are bad), thus, save new best results only if considerably better
+                // If projection doesn't change much, this point is inlier (or all points are bad). Thus, save new best results only if considerably better
                 if (bestReprojection > projectionErrorSubset && projectionErrorSubset < 0.9*reprojError){
                     bestReprojection = projectionErrorSubset;
                     bestReprojectionIndex = i;
                     bestReconstructedPoint = reconstructedPointSubset;
 
-                    double tmpScore = 0.;
+                    float tmpScore = 0.;
                     for (const auto& pt : pointsOnEachCameraSubset) {
-                      tmpScore += pt.z;
+                      tmpScore += pt.z();
                     }
                     bestScore = tmpScore / pointsOnEachCameraSubset.size();
                 }
@@ -847,21 +843,17 @@ void triangulate_persons(const vector<Person2DList::ConstPtr>& people, PersonCov
               cout << "Person " << hyp_idx << ", Joint " << kp_idx << ": large reprojection error of " << reprojError << " (approx. " << reprojError * cameraIntrinsics[0].fx() << "px)! Downweight score by factor: " << g_reproj_error_max_acceptable / reprojError << endl;
           }
 
-          Eigen::Matrix3d covariance;
+          Eigen::Matrix3f covariance;
           calc_covariance(covariance, reconstructedPoint, jointOnEachCamera, covarianceOnEachCamera, cameraMatrices);
 
-          double x = reconstructedPoint.at<double>(0),
-                 y = reconstructedPoint.at<double>(1),
-                 z = reconstructedPoint.at<double>(2);
-
           geometry_msgs::Point joint_3d; // in base-frame
-          joint_3d.x = x;
-          joint_3d.y = y;
-          joint_3d.z = z;
+          joint_3d.x = static_cast<double>(reconstructedPoint.x());
+          joint_3d.y = static_cast<double>(reconstructedPoint.y());
+          joint_3d.z = static_cast<double>(reconstructedPoint.z());
 
           person_3d.keypoints[g_kp2kpFusion_idx[kp_idx]].joint = joint_3d;
-          person_3d.keypoints[g_kp2kpFusion_idx[kp_idx]].score = static_cast<float>(avg_score);
-          setKeypointCovariance(person_3d.keypoints[g_kp2kpFusion_idx[kp_idx]], covariance);
+          person_3d.keypoints[g_kp2kpFusion_idx[kp_idx]].score = avg_score;
+          setKeypointCovariance(person_3d.keypoints[g_kp2kpFusion_idx[kp_idx]], covariance.cast<double>());
           ++num_valid_keypoints;
 
         } // End for each Keypoint
@@ -873,7 +865,7 @@ void triangulate_persons(const vector<Person2DList::ConstPtr>& people, PersonCov
             continue;
 
           int parent_idx = g_kpParent[kp_idx];
-          // Increase covariance in the case when limb-length is incoherent with model
+          // Increase covariance in this case when limb-length is incoherent with model
           if(parent_idx >= 0){ // parent is well-defined
             const auto& parent_kp = person_3d.keypoints[g_kp2kpFusion_idx[parent_idx]];
             if(parent_kp.score > 0 && g_limbLength[kp_idx] > 0){ // if parent keypoint exists and limb-length is well-defined
@@ -893,7 +885,6 @@ void triangulate_persons(const vector<Person2DList::ConstPtr>& people, PersonCov
           skel3d_joints.points.push_back(kp.joint);
           skel3d_joints.colors.push_back(g_colors[g_kp2kpFusion_idx[kp_idx]]);
 
-          // visualize covarianze ellipsoid
           if(g_param_vis_covariance && g_kp2kpFusion_idx[kp_idx] < 15){
             visualization_msgs::Marker joint_3d_cov;
             joint_3d_cov.header = skel3d_joints.header;
@@ -907,7 +898,6 @@ void triangulate_persons(const vector<Person2DList::ConstPtr>& people, PersonCov
             skel3d_markers_private.push_back(joint_3d_cov);
           }
 
-          // Add joints to skeleton for visualization
           if(parent_idx >= 0){
             if (kpIdx2msgIdx[parent_idx] != -1 && kpIdx2msgIdx[parent_idx] < skel3d_single.points.size())
               skel3d_single.points.push_back(skel3d_single.points[kpIdx2msgIdx[parent_idx]]); // add the parent joint
@@ -1015,7 +1005,7 @@ void skeletonCallback(const vector<Person2DList::ConstPtr>& people){
   g_skel_data_cv.notify_one();
 }
 
-void skeletonThreadCallback(const map<string, cv::Mat>& transforms_cam, const vector<cv::Mat>& fundamental_matrices, const vector<sensor_msgs::CameraInfo>& intrinsics,
+void skeletonThreadCallback(const map<string, Matrix34f>& transforms_cam, const vector<Eigen::Matrix3f>& fundamental_matrices, const vector<sensor_msgs::CameraInfo>& intrinsics,
                       const ros::Publisher& pers3d_pub, const ros::Publisher& skel3d_pub){
   double last_stamp = 0;
   vector<Person2DList::ConstPtr> people;
@@ -1106,7 +1096,7 @@ int main (int argc, char** argv)
   nh_private.param<bool>("vis_cov", g_param_vis_covariance, false);
   nh_private.param<double>("max_epi_dist", g_max_epipolar_error, 0.050);
   NUM_KEYPOINTS = 17;
-  g_triangulation_threshold = 0.30;
+  g_triangulation_threshold = 0.30f;
 
   if(g_param_pose_method == "h36m"){
     g_kpParent = EdgeTPU_BodyParts_H36M::kpParent;
@@ -1180,6 +1170,7 @@ int main (int argc, char** argv)
   color.r = 1.0; color.g = 0.0; color.b =  50.0f / 255.0f; g_colors.push_back(color);
 
   ros::Publisher pub_pers3d = nh.advertise<PersonCovList>(PERSON_3D_TOPIC, 1);
+
   ros::Publisher pub_skel3d = nh.advertise<visualization_msgs::MarkerArray>(SKELETON_3D_TOPIC, 1);
 
   std::vector<message_filters::Subscriber<Person2DList>> skel_subs(NUM_CAMERAS);
@@ -1190,30 +1181,39 @@ int main (int argc, char** argv)
   tf2_ros::Buffer tfBuffer;
   tf2_ros::TransformListener tfListener(tfBuffer);
 
-  map<string, cv::Mat> transforms_cam;
+  map<string, Eigen::Affine3d> transforms_cam;
   getTransforms(transforms_cam, tfBuffer);
 
-  vector<cv::Mat> Cs, Ps, fundamental_matrices;
+  vector<Eigen::Matrix3f> fundamental_matrices;
+  vector<Eigen::Matrix<double, 3, 4> > Ps;
+  vector<Eigen::Vector4d> Cs;
   for (int i = 0; i < NUM_CAMERAS; ++i) {
-    Cs.push_back(transforms_cam.at(CAM_FRAMES[i]).inv().col(3));
-    Ps.push_back(transforms_cam.at(CAM_FRAMES[i]).rowRange(0,3)); // 3 x 4 Projection Matrices
+    Cs.push_back(transforms_cam.at(CAM_FRAMES[i]).inverse().matrix().col(3));
+    Ps.push_back(transforms_cam.at(CAM_FRAMES[i]).matrix().block<3,4>(0,0)); // 3 x 4 Projection Matrices
   }
 
   for (int i = 0; i < NUM_CAMERAS; ++i) {
     for(int j = i+1; j < NUM_CAMERAS; ++j){
-      cv::Mat e_ij = Ps[j] * Cs[i];
-      cv::Mat e_ij_cross;
+      Eigen::Vector3d e_ij = Ps[j] * Cs[i];
+      Eigen::Matrix3d e_ij_cross;
       cross_prod_matrix(e_ij, e_ij_cross);
-      fundamental_matrices.push_back(e_ij_cross * Ps[j] * Ps[i].inv(cv::DECOMP_SVD));
+      Eigen::Matrix<double,4,3> Pinv;
+      pseudo_inv34d(Ps[i], Pinv);
+      fundamental_matrices.push_back((e_ij_cross * Ps[j] * Pinv).cast<float>());
     }
   }
 
   ROS_INFO("Synchronizing %d cameras, calculated %zu fundamental matrices", NUM_CAMERAS, fundamental_matrices.size());
 
+  map<string, Matrix34f> camera_matrices;
+  for (const auto & it : transforms_cam) {
+    camera_matrices.insert(std::pair<string, Matrix34f>(it.first, it.second.matrix().block<3,4>(0,0).cast<float>()));
+  }
+
   vector<sensor_msgs::CameraInfo> intrinsics;
   getIntrinsics(intrinsics, nh);
 
-  std::thread skel_data_thread(std::bind(skeletonThreadCallback, std::cref(transforms_cam), std::cref(fundamental_matrices), std::cref(intrinsics), std::cref(pub_pers3d), std::cref(pub_skel3d)));
+  std::thread skel_data_thread(std::bind(skeletonThreadCallback, std::cref(camera_matrices), std::cref(fundamental_matrices), std::cref(intrinsics), std::cref(pub_pers3d), std::cref(pub_skel3d)));
 
   typedef message_filters::sync_policies::ApproximateTimeVec<Person2DList> mySyncPolicy;
   mySyncPolicy syncPolicy(std::max(3u, 1 + NUM_CAMERAS / 4), NUM_CAMERAS);
