@@ -1,13 +1,14 @@
 # SmartEdgeSensor3DHumanPose
 In this repo we publish the code for the paper:<br>
-"Real-Time Multi-View 3D Human Pose Estimation using Semantic Feedback to Smart Edge Sensors"
+"[Real-Time Multi-View 3D Human Pose Estimation using Semantic Feedback to Smart Edge Sensors](https://www.ais.uni-bonn.de/papers/RSS_2021_Bultmann.pdf)"<br>
+[Video](https://www.ais.uni-bonn.de/videos/RSS_2021_Bultmann)
 
 ## Citation
 If you use this code for your research, please cite the following paper:
 
 Simon Bultmann and Sven Behnke<br>
 *Real-Time Multi-View 3D Human Pose Estimation using Semantic Feedback to Smart Edge Sensors*<br>
-Accepted for Robotics: Science and Systems (RSS), July 2021.
+In Proceedings of  Robotics: Science and Systems (RSS), July 2021.
 
 ## Installation
 ### Dependencies
